@@ -1,0 +1,154 @@
+---
+title: "Raster Deepdive"
+author: "Nicola Noger"
+format: html
+editor: visual
+engine: knitr
+---
+
+# Solution for Raster Deepdive
+
+In this document, I solve the tasks for raster deepdive of the course Spatiotemporal Datascience
+
+### 1. 
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidygraph)
+library(ggplot2)
+library(patchwork)
+library(sf)
+library(sfnetworks)
+
+# Load cycling network edges
+velo_network <- st_read("data/veloland.gpkg")
+
+# Build an undirected network object
+velo_network_sfnet <- as_sfnetwork(velo_network, directed = FALSE)
+
+# Compute node-level centrality measures
+velo_network_sfnet <- velo_network_sfnet %>%
+  tidygraph::activate(nodes) %>%
+  mutate(
+    betweenness = centrality_betweenness(weights = length),
+    closeness = centrality_closeness(weights = length),
+    degree = centrality_degree(weights = length)
+  )
+
+# Convert the network back to sf edges and nodes
+velo_network_edges <- velo_network_sfnet %>%
+  tidygraph::activate(edges) %>%
+  st_as_sf()
+
+velo_network_nodes <- velo_network_sfnet %>%
+  tidygraph::activate(nodes) %>%
+  st_as_sf()
+
+# Attach node centrality to edges by averaging both end nodes
+velo_network_edges_cent <- aggregate(velo_network_nodes, velo_network_edges, FUN = "mean")
+
+dark_map_theme <- theme_void() +
+  theme(
+    plot.background = element_rect(fill = "#f1f1f1", color = NA),
+    panel.background = element_rect(fill = "#7e8183", color = NA),
+    )
+
+p_betweenness <- ggplot(velo_network_edges_cent) +
+  geom_sf(aes(color = sqrt(betweenness)), size = 0.7) +
+  scale_color_viridis_c(option = "inferno") +
+  labs(title = "Betweenness")
+
+p_closeness <- ggplot(velo_network_edges_cent) +
+  geom_sf(aes(color = closeness), size = 0.7) +
+  scale_color_viridis_c(option = "inferno") +
+  labs(title = "Closeness")
+
+p_degree <- ggplot(velo_network_edges_cent) +
+  geom_sf(aes(color = degree), size = 0.7) +
+  scale_color_viridis_c(option = "inferno") +
+  labs(title = "Degree")
+
+
+whole_plot <- (p_betweenness | p_closeness | p_degree) & dark_map_theme
+
+whole_plot
+```
+The three centrality measures each capture a different aspect of the network, and therefore each of them is meaningful in its own way. At the same time, each measure also has its limitations, so no single centrality gives a complete picture on its own. The values of closeness and degree are shown on their original scale, where the exact numeric values are less important and the plot should be read more as a high-low comparison. For betweenness, it is more useful to apply a square root transformation, because otherwise the largest values would dominate the scale.
+
+
+```{r}
+# Min-max normalization to [0, 1]
+scale_01 <- function(x) {
+  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+velo_network_edges_cent <- velo_network_edges_cent %>%
+  mutate(
+    betweenness_scaled = scale_01(betweenness),
+    closeness_scaled = scale_01(closeness),
+    degree_scaled = scale_01(degree),
+    general_centrality = betweenness_scaled + closeness_scaled + degree_scaled
+  )
+
+
+p_general <- ggplot(velo_network_edges_cent) +
+  geom_sf(aes(color = general_centrality), size = 0.8) +
+  scale_color_viridis_c(option = "magma", name = "Index Score") +
+  labs(title = "General Centrality (sum)") +
+  dark_map_theme
+
+p_general
+
+```
+
+One possible limitation is the use of length as a weight. While this is reasonable for shortest path calculations, it is less intuitive for degree centrality, because degree mainly describes connectivity rather than physical distance. In this network, routes outside the dense center may therefore appear more central, since the central area is already highly connected and consists of many shorter segments. This does not necessarily make the result wrong, but it should be seen as a methodological choice that influences the interpretation.
+
+A combined index is created where the values first have to be rescaled to a common range, for example by using min-max normalization. This makes it possible to combine the different centrality measures into a single score and results in a more balanced plot that is easier to interpret. In this sense, the combined index should be understood as an exploratory summary rather than a theoretically fixed centrality measure.
+
+
+
+
+```{r}
+locations <- st_read("data/locations.gpkg")
+
+# Define Bern as origin
+origin <- st_geometry(filter(locations, Ortschaft == "Bern"))
+
+# Use all remaining locations as destinations
+destinations <- st_geometry(filter(locations, Ortschaft != "Bern"))
+
+# Compute shortest paths from Bern using edge length as weight
+shortest_paths <- st_network_paths(velo_network_sfnet, from = origin, to = destinations, weights = velo_network_sfnet$length)
+
+# edge_paths stores edge indices; merge indexed segments into one geometry per route
+
+shortest_paths_st <- shortest_paths %>%
+  rowwise() %>%
+  mutate(
+    geometry = st_union(st_geometry(velo_network_edges)[edge_paths])
+  ) %>%
+  ungroup() %>%
+  st_as_sf()
+
+  show(shortest_paths_st)
+
+shortest_paths_st <- shortest_paths_st %>%
+  mutate(route_id = as.factor(row_number()))
+
+ggplot() +
+  geom_sf(data = velo_network_edges, color = "grey30", linewidth = 0.3, alpha = 0.5) +
+  geom_sf(data = shortest_paths_st, aes(color = route_id), linewidth = 1.2) +
+  geom_sf(data = destinations, color = "green", size = 2) +
+  geom_sf(data = origin, color = "red", size = 4, shape = 17) +
+  scale_color_viridis_d(option = "turbo") + 
+  dark_map_theme +
+  theme(legend.position = "none") +
+  labs(
+    title = "Shortest paths from Bern to other locations"
+  )
+```
+
+## Use of AI
+
+AI tools (GitHub Copilot) were used in this exercise to assist with writing and debugging R code, as well as for proofreading and improving text.
